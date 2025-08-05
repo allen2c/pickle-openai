@@ -24,6 +24,7 @@ def is_azure_openai(
         | openai.AsyncAzureOpenAI
     ),
 ) -> bool:
+    """Check if client is Azure OpenAI instance."""
     for k in client.__dict__.keys():
         if "azure" in k:
             return True
@@ -63,6 +64,7 @@ class PickledOpenAI(pydantic.BaseModel):
             | openai.AsyncAzureOpenAI
         ),
     ) -> "PickledOpenAI":
+        """Create PickledOpenAI from OpenAI client instance."""
         if is_azure_openai(client):
             client = typing.cast(openai.AzureOpenAI | openai.AsyncAzureOpenAI, client)
             return cls.from_azure_openai(client)
@@ -97,6 +99,7 @@ class PickledOpenAI(pydantic.BaseModel):
     def from_azure_openai(
         cls, client: openai.AzureOpenAI | openai.AsyncAzureOpenAI
     ) -> "PickledOpenAI":
+        """Create PickledOpenAI from Azure OpenAI client instance."""
         return cls(
             api_key=pydantic.SecretStr(client.api_key) if client.api_key else None,
             api_version=client._api_version,
@@ -135,25 +138,21 @@ class PickledOpenAI(pydantic.BaseModel):
 
     @classmethod
     def pickle_loads(cls, encrypted_pickle: str, password: str) -> "PickledOpenAI":
+        """Deserialize encrypted pickle string back to PickledOpenAI instance."""
         try:
             raw = base64.urlsafe_b64decode(encrypted_pickle.encode("ascii"))
             salt, token = raw[:16], raw[16:]  # 16-byte salt prefix
             key = _derive_key(password, salt)
             data = Fernet(key).decrypt(token)  # may raise InvalidToken
-            obj_dict = pickle.loads(data)
-            return cls.model_validate(obj_dict)
+            json_obj = pickle.loads(data)
+            return cls.model_validate_json(json_obj)
         except (InvalidToken, ValueError, pickle.UnpicklingError) as exc:
             raise ValueError("Invalid password or corrupted data") from exc
 
     def pickle_dumps(self, password: str) -> str:
-        """
-        Serialize *this* model securely to a string.
-
-        • Pickle → encrypt (Fernet) → prepend salt → base64.
-        • The returned value can be safely stored or sent over the wire.
-        """
+        """Serialize this instance to encrypted string for secure storage."""
         # 1. Pickle this object as a dict (safer than pickling the raw instance)
-        pickled: bytes = pickle.dumps(json.loads(self.to_unsafe_json_serializable()))
+        pickled: bytes = pickle.dumps(self.to_unsafe_json_serializable())
 
         # 2. Derive a key from `password` and a fresh random salt
         salt = os.urandom(16)  # 128-bit salt
@@ -166,6 +165,7 @@ class PickledOpenAI(pydantic.BaseModel):
         return base64.urlsafe_b64encode(salt + token).decode("ascii")
 
     def to_openai(self) -> openai.AsyncOpenAI | openai.AsyncAzureOpenAI:
+        """Convert to AsyncOpenAI or AsyncAzureOpenAI client."""
         if any([self.azure_ad_token, self.azure_deployment, self.azure_endpoint]):
             if self.azure_endpoint is None:
                 raise ValueError("The azure_endpoint is required for Azure OpenAI")
@@ -219,6 +219,7 @@ class PickledOpenAI(pydantic.BaseModel):
             )
 
     def to_openai_sync(self) -> openai.OpenAI | openai.AzureOpenAI:
+        """Convert to sync OpenAI or AzureOpenAI client."""
         if any([self.azure_ad_token, self.azure_deployment, self.azure_endpoint]):
             if self.azure_endpoint is None:
                 raise ValueError("The azure_endpoint is required for Azure OpenAI")
@@ -271,6 +272,7 @@ class PickledOpenAI(pydantic.BaseModel):
             )
 
     def to_unsafe_json_serializable(self) -> str:
+        """Export to JSON string with secrets exposed."""
         data = json.loads(self.model_dump_json())
         data["api_key"] = self.api_key.get_secret_value() if self.api_key else None
         data["azure_ad_token"] = (
@@ -283,12 +285,7 @@ class PickledOpenAI(pydantic.BaseModel):
 
 
 def _derive_key(password: str, salt: bytes, iterations: int = 390_000) -> bytes:
-    """
-    Turn an arbitrary-length password into a Fernet key.
-
-    • `salt` must be 16–32 random bytes (we use 16).
-    • 390 000 iterations ~= the current OWASP recommendation.
-    """
+    """Derive Fernet key from password using PBKDF2."""
     kdf = PBKDF2HMAC(
         algorithm=hashes.SHA256(),
         length=32,
